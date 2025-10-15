@@ -1,0 +1,31 @@
+name = "tempemail-api"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# D1 数据库绑定
+[[d1_databases]]
+binding = "DB"
+database_name = "tempemail"
+database_id = "1f1d5a74-8932-4db3-8128-0921c2cd6675"
+
+# 环境变量
+[vars]
+DOMAIN_NAME = "dengzi52.dpdns.org"
+
+# Workers 配置
+workers_dev = true
+
+# Durable Objects (用于 WebSocket)
+[[durable_objects.bindings]]
+name = "WEBSOCKET"
+class_name = "WebSocketDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = [ "WebSocketDurableObject" ]
+
+# 路由配置（生产环境）
+# [[routes]]
+# pattern = "api.yourdomain.com/*"
+# zone_name = "yourdomain.com"
+

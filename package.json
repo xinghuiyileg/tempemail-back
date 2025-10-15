@@ -1,0 +1,15 @@
+{
+  "name": "tempemail-workers",
+  "version": "1.0.0",
+  "description": "临时邮箱系统 - Cloudflare Workers 后端",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute tempemail --file=schema.sql",
+    "db:migrations": "wrangler d1 migrations apply tempemail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.43.0"
+  }
+}
