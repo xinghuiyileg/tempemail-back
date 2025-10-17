@@ -33,6 +33,12 @@ export default async function emailRoutes(request, env, ctx) {
   // POST /create - 创建临时邮箱（可带 prefix 和 domain）
   if (path === '/create' && method === 'POST') {
     try {
+      // 获取用户 ID（用户隔离）
+      const userId = request.headers.get('X-User-ID')
+      if (!userId) {
+        return errorResponse('Missing user ID', 400)
+      }
+
       // 从配置表优先读取域名，其次回退到环境变量
       let configuredDomains = await getConfiguredDomains(env)
 
@@ -72,11 +78,11 @@ export default async function emailRoutes(request, env, ctx) {
         // 继续执行，将 rule_id 设为 null
       }
 
-      // 保存到数据库
+      // 保存到数据库（关联用户 ID）
       const result = await env.DB.prepare(`
-        INSERT INTO temp_emails (email, cloudflare_rule_id, target_email, status)
-        VALUES (?, ?, ?, 'active')
-      `).bind(emailAddress, ruleId, targetEmail).run()
+        INSERT INTO temp_emails (user_id, email, cloudflare_rule_id, target_email, status)
+        VALUES (?, ?, ?, ?, 'active')
+      `).bind(userId, emailAddress, ruleId, targetEmail).run()
 
       const emailId = result.meta.last_row_id
 
@@ -95,15 +101,24 @@ export default async function emailRoutes(request, env, ctx) {
   // GET /list - 获取邮箱列表
   if (path === '/list' && method === 'GET') {
     try {
+      // 获取用户 ID（用户隔离）
+      const userId = request.headers.get('X-User-ID')
+      if (!userId) {
+        return errorResponse('Missing user ID', 400)
+      }
+
       const page = parseInt(url.searchParams.get('page') || '1')
       const limit = parseInt(url.searchParams.get('limit') || '5')
       const offset = (page - 1) * limit
 
+      // 只统计当前用户的邮箱
       const countResult = await env.DB.prepare(`
-        SELECT COUNT(*) as total FROM temp_emails WHERE status = 'active'
-      `).first()
+        SELECT COUNT(*) as total FROM temp_emails 
+        WHERE user_id = ? AND status = 'active'
+      `).bind(userId).first()
       const total = countResult?.total || 0
 
+      // 只返回当前用户的邮箱
       const result = await env.DB.prepare(`
         SELECT 
           id, 
@@ -113,10 +128,10 @@ export default async function emailRoutes(request, env, ctx) {
           message_count,
           status
         FROM temp_emails
-        WHERE status = 'active'
+        WHERE user_id = ? AND status = 'active'
         ORDER BY created_at DESC
         LIMIT ? OFFSET ?
-      `).bind(limit, offset).all()
+      `).bind(userId, limit, offset).all()
 
       return successResponse({
         emails: result.results || [],
@@ -136,12 +151,27 @@ export default async function emailRoutes(request, env, ctx) {
   // GET /:id/messages - 获取某个邮箱的邮件列表
   if (path.match(/^\/\d+\/messages$/) && method === 'GET') {
     try {
+      // 获取用户 ID（用户隔离）
+      const userId = request.headers.get('X-User-ID')
+      if (!userId) {
+        return errorResponse('Missing user ID', 400)
+      }
+
       const emailId = parseInt(path.split('/')[1])
       const page = parseInt(url.searchParams.get('page') || '1')
       const limit = parseInt(url.searchParams.get('limit') || '4')
       const offset = (page - 1) * limit
 
-      console.log('[email.js] GET /:id/messages - emailId:', emailId, 'page:', page, 'limit:', limit, 'offset:', offset)
+      console.log('[email.js] GET /:id/messages - userId:', userId, 'emailId:', emailId, 'page:', page)
+
+      // 验证邮箱所有权
+      const email = await env.DB.prepare(`
+        SELECT id FROM temp_emails WHERE id = ? AND user_id = ?
+      `).bind(emailId, userId).first()
+
+      if (!email) {
+        return errorResponse('Email not found or access denied', 404)
+      }
 
       // 统计总数
       const countResult = await env.DB.prepare(`
@@ -187,15 +217,21 @@ export default async function emailRoutes(request, env, ctx) {
   // DELETE /:id - 删除邮箱
   if (path.match(/^\/\d+$/) && method === 'DELETE') {
     try {
+      // 获取用户 ID（用户隔离）
+      const userId = request.headers.get('X-User-ID')
+      if (!userId) {
+        return errorResponse('Missing user ID', 400)
+      }
+
       const id = parseInt(path.slice(1))
 
-      // 获取邮箱信息
+      // 获取邮箱信息并验证所有权
       const email = await env.DB.prepare(`
-        SELECT * FROM temp_emails WHERE id = ?
-      `).bind(id).first()
+        SELECT * FROM temp_emails WHERE id = ? AND user_id = ?
+      `).bind(id, userId).first()
 
       if (!email) {
-        return errorResponse('Email not found', 404)
+        return errorResponse('Email not found or access denied', 404)
       }
 
       // 删除 Cloudflare 规则
@@ -228,6 +264,12 @@ export default async function emailRoutes(request, env, ctx) {
   // POST /batch-delete - 批量删除
   if (path === '/batch-delete' && method === 'POST') {
     try {
+      // 获取用户 ID（用户隔离）
+      const userId = request.headers.get('X-User-ID')
+      if (!userId) {
+        return errorResponse('Missing user ID', 400)
+      }
+
       const body = await request.json()
       const ids = body.ids || []
 
@@ -239,10 +281,10 @@ export default async function emailRoutes(request, env, ctx) {
 
       for (const id of ids) {
         try {
-          // 获取邮箱信息
+          // 获取邮箱信息并验证所有权
           const email = await env.DB.prepare(`
-            SELECT * FROM temp_emails WHERE id = ?
-          `).bind(id).first()
+            SELECT * FROM temp_emails WHERE id = ? AND user_id = ?
+          `).bind(id, userId).first()
 
           if (email) {
             // 删除 Cloudflare 规则

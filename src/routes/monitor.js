@@ -8,6 +8,12 @@ export default async function monitorRoutes(request, env, ctx) {
   // GET /status - 获取监控状态
   if (path === '/status' && method === 'GET') {
     try {
+      // 获取用户 ID（用户隔离）
+      const userId = request.headers.get('X-User-ID')
+      if (!userId) {
+        return errorResponse('Missing user ID', 400)
+      }
+
       // 获取监控状态配置
       const statusConfig = await env.DB.prepare(`
         SELECT config_value FROM config WHERE config_key = 'monitor_status'
@@ -17,18 +23,23 @@ export default async function monitorRoutes(request, env, ctx) {
         SELECT config_value FROM config WHERE config_key = 'last_check_time'
       `).first()
 
-      // 统计数据
+      // 统计数据（仅统计当前用户的数据）
       const emailCount = await env.DB.prepare(`
-        SELECT COUNT(*) as count FROM temp_emails WHERE status = 'active'
-      `).first()
+        SELECT COUNT(*) as count FROM temp_emails 
+        WHERE user_id = ? AND status = 'active'
+      `).bind(userId).first()
 
       const messageCount = await env.DB.prepare(`
-        SELECT COUNT(*) as count FROM messages
-      `).first()
+        SELECT COUNT(*) as count FROM messages m
+        INNER JOIN temp_emails e ON m.temp_email_id = e.id
+        WHERE e.user_id = ?
+      `).bind(userId).first()
 
       const codeCount = await env.DB.prepare(`
-        SELECT COUNT(*) as count FROM messages WHERE verification_code IS NOT NULL
-      `).first()
+        SELECT COUNT(*) as count FROM messages m
+        INNER JOIN temp_emails e ON m.temp_email_id = e.id
+        WHERE e.user_id = ? AND m.verification_code IS NOT NULL
+      `).bind(userId).first()
 
       return successResponse({
         status: statusConfig?.config_value || 'stopped',
