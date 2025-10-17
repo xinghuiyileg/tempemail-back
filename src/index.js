@@ -4,7 +4,9 @@ import emailRoutes from './routes/email'
 import messageRoutes from './routes/message'
 import monitorRoutes from './routes/monitor'
 import configRoutes from './routes/config'
+import authRoutes from './routes/auth'
 import emailWorker from './email-worker'
+import { requireAuth, requiresAuth } from './middleware/auth'
 
 export default {
   async fetch(request, env, ctx) {
@@ -13,9 +15,52 @@ export default {
       return new Response(null, { headers: corsHeaders })
     }
 
+    // 基础健康检查与欢迎页
+    try {
+      const url = new URL(request.url)
+      const path = url.pathname
+      if (request.method === 'GET' && (path === '/' || path === '/api')) {
+        const body = JSON.stringify({
+          success: true,
+          name: 'tempemail-api',
+          status: 'ok',
+          endpoints: ['/api/emails', '/api/messages', '/api/monitor', '/api/config'],
+          health: '/health'
+        })
+        return new Response(body, {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            ...corsHeaders
+          }
+        })
+      }
+      if (request.method === 'GET' && (path === '/health' || path === '/api/health')) {
+        return new Response(JSON.stringify({ success: true, status: 'ok' }), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            ...corsHeaders
+          }
+        })
+      }
+    } catch (_) {}
+
+    // 访问控制检查（除了公开路径）
+    const url = new URL(request.url)
+    const path = url.pathname
+    
+    if (requiresAuth(path)) {
+      const authError = requireAuth(request, env)
+      if (authError) {
+        return authError
+      }
+    }
+
     const router = new Router()
 
     // 注册路由
+    router.use('/api/auth', authRoutes)
     router.use('/api/emails', emailRoutes)
     router.use('/api/messages', messageRoutes)
     router.use('/api/monitor', monitorRoutes)

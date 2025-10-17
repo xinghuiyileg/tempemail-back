@@ -33,8 +33,8 @@ export default async function emailRoutes(request, env, ctx) {
   // POST /create - 创建临时邮箱（可带 prefix 和 domain）
   if (path === '/create' && method === 'POST') {
     try {
-      let configuredDomains = parseDomains(env.DOMAIN_NAME || 'yourdomain.com')
-      if (configuredDomains.length === 0) configuredDomains = ['yourdomain.com']
+      // 从配置表优先读取域名，其次回退到环境变量
+      let configuredDomains = await getConfiguredDomains(env)
 
       const targetEmail = env.TARGET_EMAIL || await getTargetEmail(env)
       if (!targetEmail) {
@@ -95,6 +95,15 @@ export default async function emailRoutes(request, env, ctx) {
   // GET /list - 获取邮箱列表
   if (path === '/list' && method === 'GET') {
     try {
+      const page = parseInt(url.searchParams.get('page') || '1')
+      const limit = parseInt(url.searchParams.get('limit') || '5')
+      const offset = (page - 1) * limit
+
+      const countResult = await env.DB.prepare(`
+        SELECT COUNT(*) as total FROM temp_emails WHERE status = 'active'
+      `).first()
+      const total = countResult?.total || 0
+
       const result = await env.DB.prepare(`
         SELECT 
           id, 
@@ -106,22 +115,33 @@ export default async function emailRoutes(request, env, ctx) {
         FROM temp_emails
         WHERE status = 'active'
         ORDER BY created_at DESC
-      `).all()
+        LIMIT ? OFFSET ?
+      `).bind(limit, offset).all()
 
-      return successResponse(result.results || [])
+      return successResponse({
+        emails: result.results || [],
+        pagination: {
+          page,
+          limit,
+          total,
+          total_pages: Math.ceil(total / limit)
+        }
+      })
     } catch (error) {
       console.error('List emails error:', error)
       return errorResponse(error.message)
     }
   }
 
-  // GET /:id/messages - 获取某个邮箱的邮件列表（与前端 /api/emails/:id/messages 对应）
+  // GET /:id/messages - 获取某个邮箱的邮件列表
   if (path.match(/^\/\d+\/messages$/) && method === 'GET') {
     try {
       const emailId = parseInt(path.split('/')[1])
       const page = parseInt(url.searchParams.get('page') || '1')
-      const limit = parseInt(url.searchParams.get('limit') || '20')
+      const limit = parseInt(url.searchParams.get('limit') || '4')
       const offset = (page - 1) * limit
+
+      console.log('[email.js] GET /:id/messages - emailId:', emailId, 'page:', page, 'limit:', limit, 'offset:', offset)
 
       // 统计总数
       const countResult = await env.DB.prepare(`
@@ -147,12 +167,14 @@ export default async function emailRoutes(request, env, ctx) {
         LIMIT ? OFFSET ?
       `).bind(emailId, limit, offset).all()
 
+      console.log('[email.js] Returning page:', page, 'results:', result.results?.length)
+
       return successResponse({
         messages: result.results || [],
         pagination: {
-          page,
-          limit,
-          total,
+          page: page,  // 明确返回请求的页码
+          limit: limit,
+          total: total,
           total_pages: Math.ceil(total / limit)
         }
       })
@@ -270,6 +292,23 @@ async function getTargetEmail(env) {
   } catch (error) {
     console.error('Failed to get target email:', error)
     return null
+  }
+}
+
+// 从配置中获取域名列表（优先 DB，其次 ENV）
+async function getConfiguredDomains(env) {
+  try {
+    const row = await env.DB.prepare(`
+      SELECT config_value FROM config WHERE config_key = 'domain_name'
+    `).first()
+    const fromDb = row?.config_value
+    let list = parseDomains(fromDb || env.DOMAIN_NAME || 'yourdomain.com')
+    if (list.length === 0) list = ['yourdomain.com']
+    return list
+  } catch (e) {
+    let list = parseDomains(env.DOMAIN_NAME || 'yourdomain.com')
+    if (list.length === 0) list = ['yourdomain.com']
+    return list
   }
 }
 

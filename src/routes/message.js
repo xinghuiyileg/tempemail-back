@@ -10,7 +10,7 @@ export default async function messageRoutes(request, env, ctx) {
     try {
       const emailId = parseInt(path.split('/')[2])
       const page = parseInt(url.searchParams.get('page') || '1')
-      const limit = parseInt(url.searchParams.get('limit') || '20')
+      const limit = parseInt(url.searchParams.get('limit') || '4')
       const offset = (page - 1) * limit
 
       // 获取总数

@@ -35,14 +35,27 @@ export default {
           if (done) break
           chunks.push(value)
         }
-        
-        const rawEmail = new TextDecoder().decode(
-          new Uint8Array(chunks.flatMap(chunk => Array.from(chunk)))
-        )
 
-        // 简单解析（实际应使用邮件解析库）
-        bodyText = extractTextFromRaw(rawEmail)
-        bodyHtml = extractHtmlFromRaw(rawEmail)
+        const rawBytes = new Uint8Array(chunks.reduce((acc, cur) => acc + cur.length, 0))
+        {
+          let offset = 0
+          for (const chunk of chunks) {
+            rawBytes.set(chunk, offset)
+            offset += chunk.length
+          }
+        }
+
+        // 优先按 MIME 解析（支持 multipart, base64, quoted-printable, charset）
+        const parsed = parseMimeMessage(rawBytes)
+        bodyText = parsed.text || ''
+        bodyHtml = parsed.html || ''
+
+        // 兜底：退回到简单正则
+        if (!bodyText && !bodyHtml) {
+          const rawEmail = new TextDecoder().decode(rawBytes)
+          bodyText = extractTextFromRaw(rawEmail)
+          bodyHtml = extractHtmlFromRaw(rawEmail)
+        }
       } catch (error) {
         console.error('Failed to read email body:', error)
       }
@@ -116,6 +129,90 @@ export default {
       }
     }
   }
+}
+
+// 轻量 MIME 解析器：尝试解析常见的 multipart/alternative、quoted-printable、base64 与 charset
+function parseMimeMessage(rawBytes) {
+  try {
+    const raw = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }).decode(rawBytes)
+    const contentTypeMatch = raw.match(/Content-Type:\s*([^;\r\n]+)(;[\s\S]*?)?\r?\n/i)
+    const contentType = contentTypeMatch ? contentTypeMatch[1].toLowerCase() : ''
+    const boundaryMatch = raw.match(/boundary=\"?([^\";\r\n]+)\"?/i)
+    const boundary = boundaryMatch ? boundaryMatch[1] : null
+
+    // 简单 body 提取（跳过 headers）
+    const separator = /\r?\n\r?\n/
+    const headerEndIndex = raw.search(separator)
+    const bodyRaw = headerEndIndex >= 0 ? raw.slice(headerEndIndex + raw.match(separator)[0].length) : raw
+
+    // multipart 处理
+    if (boundary && /multipart\//.test(contentType)) {
+      const parts = bodyRaw.split(new RegExp(`--${boundary}(?:--)?\r?\n`))
+      let text = ''
+      let html = ''
+      for (const part of parts) {
+        if (!part || part.trim() === '--') continue
+        const partHeaderEnd = part.search(separator)
+        if (partHeaderEnd < 0) continue
+        const partHeaders = part.slice(0, partHeaderEnd)
+        const partBody = part.slice(partHeaderEnd + part.match(separator)[0].length)
+        const partTypeMatch = partHeaders.match(/Content-Type:\s*([^;\r\n]+)/i)
+        const partType = partTypeMatch ? partTypeMatch[1].toLowerCase() : ''
+        const encoding = (partHeaders.match(/Content-Transfer-Encoding:\s*([^\r\n]+)/i)?.[1] || '').toLowerCase()
+        const charset = (partHeaders.match(/charset=\"?([^\";\r\n]+)\"?/i)?.[1] || 'utf-8').toLowerCase()
+
+        const decoded = decodeBody(partBody.trim(), encoding, charset)
+        if (/text\/plain/.test(partType) && !text) text = decoded
+        if (/text\/html/.test(partType) && !html) html = decoded
+      }
+      return { text, html }
+    }
+
+    // 单体 text/html 或 text/plain
+    const encoding = (raw.match(/Content-Transfer-Encoding:\s*([^\r\n]+)/i)?.[1] || '').toLowerCase()
+    const charset = (raw.match(/charset=\"?([^\";\r\n]+)\"?/i)?.[1] || 'utf-8').toLowerCase()
+    const decoded = decodeBody(bodyRaw.trim(), encoding, charset)
+    if (/text\/html/.test(contentType)) return { text: '', html: decoded }
+    if (/text\/plain/.test(contentType)) return { text: decoded, html: '' }
+
+    // 未知类型，原样返回为 text
+    return { text: decoded, html: '' }
+  } catch (e) {
+    return { text: '', html: '' }
+  }
+}
+
+function decodeBody(body, encoding, charset) {
+  try {
+    let bytes
+    if (encoding === 'base64') {
+      // 去除 CRLF 和空白
+      const clean = body.replace(/\s+/g, '')
+      const bin = atob(clean)
+      bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    } else if (encoding === 'quoted-printable') {
+      const qp = body
+        .replace(/=\r?\n/g, '')
+        .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      bytes = new TextEncoder().encode(qp)
+    } else {
+      bytes = new TextEncoder().encode(body)
+    }
+
+    // 简化：Cloudflare 环境支持 TextDecoder，多数邮件为 utf-8/gbk/gb2312
+    const dec = new TextDecoder(normalizeCharset(charset), { fatal: false })
+    return dec.decode(bytes)
+  } catch (_) {
+    return body
+  }
+}
+
+function normalizeCharset(cs) {
+  const c = cs.toLowerCase()
+  if (c.includes('gb2312') || c.includes('gbk')) return 'gbk'
+  if (c.includes('utf-8') || c.includes('utf8')) return 'utf-8'
+  return 'utf-8'
 }
 
 // 辅助函数：从原始邮件中提取文本

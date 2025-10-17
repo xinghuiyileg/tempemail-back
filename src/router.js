@@ -14,13 +14,13 @@ export class Router {
 
     for (const route of this.routes) {
       if (path.startsWith(route.prefix)) {
-        const subPath = path.slice(route.prefix.length) || '/'
-        const subRequest = new Request(
-          new URL(subPath, request.url),
-          request
-        )
-        
-        return await route.handler(subRequest, env, ctx)
+      const subPath = path.slice(route.prefix.length) || '/'
+      // Preserve original query string when rewriting the path
+      const subUrl = new URL(request.url)
+      subUrl.pathname = subPath
+      const subRequest = new Request(subUrl.toString(), request)
+
+      return await route.handler(subRequest, env, ctx)
       }
     }
 
