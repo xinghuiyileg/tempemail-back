@@ -60,10 +60,15 @@ export default {
         console.error('Failed to read email body:', error)
       }
 
-      // 提取验证码
-      const verificationCode = extractCodeFromEmail(subject, bodyText || bodyHtml)
+      // 修复可能的乱码
+      bodyText = fixGarbledText(bodyText)
+      bodyHtml = fixGarbledText(bodyHtml)
+      const fixedSubject = fixGarbledText(subject)
 
-      // 保存到数据库
+      // 提取验证码（使用修复后的内容）
+      const verificationCode = extractCodeFromEmail(fixedSubject, bodyText || bodyHtml)
+
+      // 保存到数据库（使用修复后的内容）
       const messageId = message.headers.get('message-id') || generateMessageId()
       
       await env.DB.prepare(`
@@ -82,7 +87,7 @@ export default {
         tempEmail.id,
         messageId,
         from,
-        subject,
+        fixedSubject,
         bodyText,
         bodyHtml,
         verificationCode,
@@ -134,7 +139,8 @@ export default {
 // 轻量 MIME 解析器：尝试解析常见的 multipart/alternative、quoted-printable、base64 与 charset
 function parseMimeMessage(rawBytes) {
   try {
-    const raw = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }).decode(rawBytes)
+    // 使用 latin1 解码邮件头部（避免中文乱码）
+    const raw = new TextDecoder('latin1').decode(rawBytes)
     const contentTypeMatch = raw.match(/Content-Type:\s*([^;\r\n]+)(;[\s\S]*?)?\r?\n/i)
     const contentType = contentTypeMatch ? contentTypeMatch[1].toLowerCase() : ''
     const boundaryMatch = raw.match(/boundary=\"?([^\";\r\n]+)\"?/i)
@@ -185,34 +191,94 @@ function parseMimeMessage(rawBytes) {
 function decodeBody(body, encoding, charset) {
   try {
     let bytes
+    
     if (encoding === 'base64') {
-      // 去除 CRLF 和空白
+      // Base64 解码
       const clean = body.replace(/\s+/g, '')
       const bin = atob(clean)
       bytes = new Uint8Array(bin.length)
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      for (let i = 0; i < bin.length; i++) {
+        bytes[i] = bin.charCodeAt(i)
+      }
     } else if (encoding === 'quoted-printable') {
-      const qp = body
-        .replace(/=\r?\n/g, '')
-        .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-      bytes = new TextEncoder().encode(qp)
+      // Quoted-Printable 解码
+      // 先处理软换行
+      let qp = body.replace(/=\r?\n/g, '')
+      // 解码 =XX 格式
+      const decoded = qp.replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => {
+        return String.fromCharCode(parseInt(hex, 16))
+      })
+      // 转换为字节数组（使用 latin1 避免再次编码）
+      bytes = new Uint8Array(decoded.length)
+      for (let i = 0; i < decoded.length; i++) {
+        bytes[i] = decoded.charCodeAt(i) & 0xFF
+      }
     } else {
-      bytes = new TextEncoder().encode(body)
+      // 8bit 或 7bit 编码，直接使用原始字节
+      bytes = new Uint8Array(body.length)
+      for (let i = 0; i < body.length; i++) {
+        bytes[i] = body.charCodeAt(i) & 0xFF
+      }
     }
 
-    // 简化：Cloudflare 环境支持 TextDecoder，多数邮件为 utf-8/gbk/gb2312
-    const dec = new TextDecoder(normalizeCharset(charset), { fatal: false })
-    return dec.decode(bytes)
-  } catch (_) {
+    // 根据字符集解码
+    const targetCharset = normalizeCharset(charset)
+    
+    // Cloudflare Workers 环境不支持 GBK，回退到 UTF-8
+    try {
+      const dec = new TextDecoder(targetCharset, { fatal: false })
+      return dec.decode(bytes)
+    } catch (e) {
+      // 如果字符集不支持，尝试 UTF-8
+      const dec = new TextDecoder('utf-8', { fatal: false })
+      return dec.decode(bytes)
+    }
+  } catch (error) {
+    console.error('Decode body error:', error)
     return body
   }
 }
 
 function normalizeCharset(cs) {
   const c = cs.toLowerCase()
-  if (c.includes('gb2312') || c.includes('gbk')) return 'gbk'
+  // 注意：Cloudflare Workers 可能不支持 GBK
+  // 如果是 GBK，尝试 UTF-8（大多数现代邮件都是 UTF-8）
+  if (c.includes('gb2312') || c.includes('gbk')) {
+    console.warn('GBK charset detected, trying UTF-8 instead')
+    return 'utf-8'
+  }
   if (c.includes('utf-8') || c.includes('utf8')) return 'utf-8'
+  if (c.includes('iso-8859-1') || c.includes('latin')) return 'latin1'
   return 'utf-8'
+}
+
+/**
+ * 修复乱码文本（尝试重新解码）
+ */
+function fixGarbledText(text) {
+  if (!text) return text
+  
+  try {
+    // 检测是否为 UTF-8 乱码（常见模式：é®ç®±）
+    if (/[ÃÂ©Â®Â][^a-zA-Z0-9\s]{2,}/.test(text)) {
+      // 尝试重新编码为 latin1 字节，然后用 UTF-8 解码
+      const bytes = new Uint8Array(text.length)
+      for (let i = 0; i < text.length; i++) {
+        bytes[i] = text.charCodeAt(i) & 0xFF
+      }
+      const fixed = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+      
+      // 检查修复后是否有中文字符
+      if (/[\u4e00-\u9fa5]/.test(fixed)) {
+        console.log('Fixed garbled text')
+        return fixed
+      }
+    }
+  } catch (e) {
+    console.error('Fix garbled text error:', e)
+  }
+  
+  return text
 }
 
 // 辅助函数：从原始邮件中提取文本
