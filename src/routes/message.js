@@ -42,6 +42,7 @@ export default async function messageRoutes(request, env, ctx) {
           sender,
           subject,
           body_text,
+          body_html,
           verification_code,
           received_at,
           is_read,
