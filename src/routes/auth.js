@@ -75,6 +75,39 @@ export default async function authRoutes(request, env, ctx) {
     })
   }
 
+  // POST /admin/verify - 验证管理员密码
+  if (path === '/admin/verify' && method === 'POST') {
+    try {
+      const { password } = await request.json()
+
+      if (!password) {
+        return errorResponse('密码不能为空', 400)
+      }
+
+      // 获取环境变量中的管理员密码
+      const adminPassword = env.ADMIN_PASSWORD
+
+      if (!adminPassword) {
+        return errorResponse('管理员功能未启用', 403)
+      }
+
+      // 验证密码
+      if (password !== adminPassword) {
+        console.warn('Invalid admin password attempt')
+        return errorResponse('管理员密码错误', 401)
+      }
+
+      console.log('Admin password verified successfully')
+      return successResponse({
+        valid: true,
+        message: '管理员身份验证成功'
+      })
+    } catch (error) {
+      console.error('Admin verify error:', error)
+      return errorResponse('验证失败', 500)
+    }
+  }
+
   return errorResponse('Not Found', 404)
 }
 
